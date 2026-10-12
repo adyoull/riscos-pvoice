@@ -20,7 +20,8 @@ VERSION ?= 0.0.1-test5
 # The voice packaged (its dataset is CC BY-SA 4.0), and the one the tests'
 # references were made with (tools/get-voices.sh fetches and converts both).
 VOICE ?= voices/en_GB-southern_english_female-low.voice
-TEST_VOICE ?= voices/en_GB-alan-low.voice
+TEST_VOICE ?= voices/en_GB-southern_english_female-low.voice
+TEST_VOICE32 ?= voices/en_GB-southern_english_female-low-f32.voice
 
 RO_CC := $(RISCOS_TOOLCHAIN)/bin/arm-riscos-gnueabihf-gcc
 AL_CC := arm-linux-gnueabihf-gcc
@@ -95,7 +96,7 @@ build/al/pv_bench: tests/pv_bench.c $(PV_SRC) $(PV_HDR)
 	@mkdir -p $(@D)
 	$(AL_CC) $(AL_CFLAGS) $(WARN) -no-pie -Isrc tests/pv_bench.c $(PV_SRC) -lm -o $@
 bench: build/al/pv_bench
-	time $(QEMU) build/al/pv_bench voices/en_GB-alan-low-f32.voice tests/ref
+	time $(QEMU) build/al/pv_bench $(TEST_VOICE32) tests/ref
 
 build/ro/pipersay.elf: $(SAY_SRC) $(SAY_HDR) $(PV_SRC) $(PV_HDR) build/ro/libespeak.a
 	$(RO_CC) $(RO_CFLAGS) $(WARN) -static -Isrc -I$(ES)/src/include $(SAY_SRC) $(PV_SRC) build/ro/libespeak.a -lm -o $@
@@ -106,8 +107,8 @@ ESDATA := build/espeak-ng-data
 # Strict against ONNX Runtime with the float32 voice; looser with the
 # float16 one (half-precision weights: inaudible, but not bit-close).
 test: build/host/pv_test build/al/pv_test build/host/pipersay build/al/pipersay
-	build/host/pv_test voices/en_GB-alan-low-f32.voice tests/ref
-	$(QEMU) build/al/pv_test voices/en_GB-alan-low-f32.voice tests/ref
+	build/host/pv_test $(TEST_VOICE32) tests/ref
+	$(QEMU) build/al/pv_test $(TEST_VOICE32) tests/ref
 	PV_TOL=f16 build/host/pv_test $(TEST_VOICE) tests/ref
 	tests/compare-ids.sh build/host/pipersay $(TEST_VOICE) $(ESDATA)
 	PATH=$(RISCOS_TOOLCHAIN)/bin:$$PATH tests/compare-ids.sh "$(RCD_DIR)/qemu/aligntrap.sh build/al/pipersay" $(TEST_VOICE) $(ESDATA)

@@ -72,7 +72,7 @@ and python3 with `onnx` and `numpy` (and `onnxruntime` and `piper-tts` to
 remake the test references).
 
     tools/build-espeak.sh    # eSpeak NG at Piper's commit, patched; English data
-    tools/get-voices.sh      # the en-GB voices, converted
+    tools/get-voices.sh      # the en-GB voice, converted
     make && make test        # host and ARM Linux builds, tests
     make zip                 # build/PiperSay-<version>.zip for RISC OS
 
@@ -81,5 +81,5 @@ remake the test references).
 The engine and PiperSay are **GPL-3.0-or-later** (they include eSpeak NG,
 GPL-3.0-or-later): see `COPYING`. The build scripts, Makefile, tests and
 tools are MIT (`LICENSE-MIT`). Each voice has its own licence: the
-packaged Southern English Female voice is CC BY-SA 4.0 (`docs/VOICES.txt`).
-The Alan voice used by the tests isn't redistributable and isn't included.
+packaged Southern English Female voice is CC BY-SA 4.0 (`docs/VOICES.txt`);
+the tests' references in `tests/ref` were made with it.
