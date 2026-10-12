@@ -5,8 +5,13 @@ A test of Piper's neural voices on RISC OS: it speaks text, and says how
 long that took on this computer. The voice is Southern English Female
 (Piper, "low" quality, 16 kHz); text becomes phonemes through eSpeak NG.
 
-Needs: RISC OS 5 on a machine with NEON (Raspberry Pi 2 or later), and
-SharedSoundBuffer and StreamManager to play the sound (as MIDISynth does).
+Needs: RISC OS 5 on a machine with NEON (Raspberry Pi 2 or later). To play
+the sound it needs SharedSound 1.07, StreamManager 0.03 and
+SharedSoundBuffer 0.07 in System:Modules (as !SoftMIDI does).
+SharedSoundBuffer and StreamManager are freeware by John Duffell and can't
+be included here: get ssb.zip and merge its !System into yours.
+!PiperSay loads them when it's run. Without them, PiperSay can still write
+the WAV file (-o).
 The voice takes about 65 MB of memory once loaded.
 
 The test

@@ -1,3 +1,14 @@
-| !Run for !PiperSay: sets PiperSay$Dir and the PiperSay command.
+| !Run for !PiperSay: sets PiperSay$Dir and the PiperSay command, and loads
+| the sound modules PiperSay -p plays through (as !SoftMIDI's LoadSound does).
 Set PiperSay$Dir <Obey$Dir>
 Set Alias$PiperSay WimpSlot -min 4000K|MRun <PiperSay$Dir>.PiperSay %*0
+| SharedSoundBuffer and StreamManager are by John Duffell and aren't
+| included (their terms don't allow it); see !Help.
+RMEnsure SharedSound 1.07 IfThere System:Modules.SSound Then RMLoad System:Modules.SSound
+RMEnsure StreamManager 0.03 IfThere System:Modules.StreamMan Then RMLoad System:Modules.StreamMan
+| SharedSoundBuffer only if the two modules it needs are there.
+Set PiperSay$SSB 1
+RMEnsure SharedSound 1.07 Set PiperSay$SSB 0
+RMEnsure StreamManager 0.03 Set PiperSay$SSB 0
+If "<PiperSay$SSB>" = "1" Then RMEnsure SharedSoundBuffer 0.07 IfThere System:Modules.SSBuffer Then RMLoad System:Modules.SSBuffer
+Unset PiperSay$SSB

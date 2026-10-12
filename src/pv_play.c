@@ -2,7 +2,8 @@
  * Copyright (C) 2026 Andrew Youll */
 /* Plays 16-bit mono samples to the end (blocking), through SharedSoundBuffer
  * and StreamManager (John Duffell's modules, which mix into SharedSound),
- * the way riscos-midisynth's output_ssb.c does. */
+ * the way riscos-midisynth's output_ssb.c does. The modules are loaded by
+ * !PiperSay.!Run (SharedSound, StreamManager, then SharedSoundBuffer). */
 #include "pv_play.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,12 +44,12 @@ int pv_play(const short *s, size_t n, int rate, char *err, size_t err_size)
 	size_t pos = 0;
 	unsigned now = 0, since = 0;
 	int last_q = -1;
-	_kernel_oscli("RMEnsure SharedSoundBuffer 0 RMLoad System:Modules.SSBuffer");
 	r.r[0] = 2;                     /* R2 holds the block size */
 	r.r[1] = (int)"PiperSay";
 	r.r[2] = BLOCK_BYTES;
 	if ((e = _kernel_swi(XSharedSoundBuffer_OpenStream, &r, &r)) != NULL) {
-		snprintf(err, err_size, "can't play (SharedSoundBuffer: %s)", e->errmess);
+		snprintf(err, err_size, "can't play: %s (SharedSound, StreamManager and SharedSoundBuffer "
+			"are needed: run !PiperSay to load them)", e->errmess);
 		return -1;
 	}
 	ssb = r.r[0];

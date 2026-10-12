@@ -16,7 +16,7 @@
 -include config.mk
 RCD_DIR ?= ../riscos-crossdev
 RISCOS_TOOLCHAIN ?= /opt/riscos-crossdev-toolchain-1.4-x86_64-linux
-VERSION ?= 0.0.1-test1
+VERSION ?= 0.0.1-test2
 # The voice packaged (its dataset is CC BY-SA 4.0), and the one the tests'
 # references were made with (tools/get-voices.sh fetches and converts both).
 VOICE ?= voices/en_GB-southern_english_female-low.voice
