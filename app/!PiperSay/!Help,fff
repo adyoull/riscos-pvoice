@@ -1,0 +1,37 @@
+PiperSay (test build)
+=====================
+
+A test of Piper's neural voices on RISC OS: it speaks text, and says how
+long that took on this computer. The voice is Southern English Female
+(Piper, "low" quality, 16 kHz); text becomes phonemes through eSpeak NG.
+
+Needs: RISC OS 5 on a machine with NEON (Raspberry Pi 2 or later), and
+SharedSoundBuffer and StreamManager to play the sound (as MIDISynth does).
+The voice takes about 65 MB of memory once loaded.
+
+The test
+  Double-click !PiperSay (once), then open a TaskWindow (Ctrl-F12) and type
+      Obey <PiperSay$Dir>.Test
+  It reads TestText aloud. For each sentence it prints the number of
+  phonemes, how long the speech is, how long it took to make, and the
+  ratio; at the end the overall "real-time factor": under 1 means the
+  computer can speak as fast as it talks. The audio is also written to
+  <Wimp$ScrapDir>.PiperTest (a WAV file).
+
+Saying something
+      PiperSay -p Hello from RISC OS.
+  Options:
+      -p          play it
+      -o file     write a WAV file
+      -f file     read the text from a file
+      -r 1.2      slower (0.8 faster)
+      -n          no randomness (the same every time, but flatter)
+      -s 42       a fixed random seed (the same every time)
+      -i          show each sentence's phonemes
+      -v voice    another .voice file
+  Command lines are short on RISC OS; put longer text in a file.
+
+Licences
+  PiperSay is GPL-3.0-or-later (it includes eSpeak NG, also GPL-3.0-or-
+  later): see Licence. The voice is Piper's, trained on the OpenSLR SLR83
+  recordings and licensed CC BY-SA 4.0: see VoiceLicence.

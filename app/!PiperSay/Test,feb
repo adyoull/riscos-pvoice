@@ -1,0 +1,5 @@
+| Times PiperSay on this computer, then plays what it said.
+| Run it in a TaskWindow (Ctrl-F12): Obey <PiperSay$Dir>.Test
+Set PiperSay$Dir <Obey$Dir>
+WimpSlot -min 4000K
+Run <PiperSay$Dir>.PiperSay -f <PiperSay$Dir>.TestText -o <Wimp$ScrapDir>.PiperTest -p

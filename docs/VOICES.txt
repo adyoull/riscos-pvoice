@@ -1,0 +1,17 @@
+Voice: en_GB-southern_english_female-low
+========================================
+
+This voice is a Piper text-to-speech model ("southern_english_female",
+low quality, 16 kHz), from the Piper project's release v0.0.2
+(https://github.com/rhasspy/piper), converted from ONNX to pvoice's .voice
+format (weights stored at half precision) by tools/onnx2voice.py.
+
+It was trained on the "Crowdsourced high-quality UK and Ireland English
+Dialect speech data set" (OpenSLR SLR83, https://www.openslr.org/83/), by
+Isin Demirsahin, Oddur Kjartansson, Alexander Gutkin and Clara Rivera
+(Google), and was fine-tuned from Piper's U.S. English "Ryan" voice.
+
+The data set is licensed under the Creative Commons Attribution-ShareAlike
+4.0 International licence (CC BY-SA 4.0),
+https://creativecommons.org/licenses/by-sa/4.0/; this voice, made from it,
+is shared under the same licence.

@@ -1,0 +1,5 @@
+build/
+third/
+voices/
+config.mk
+__pycache__/

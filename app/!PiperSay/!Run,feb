@@ -1,0 +1,3 @@
+| !Run for !PiperSay: sets PiperSay$Dir and the PiperSay command.
+Set PiperSay$Dir <Obey$Dir>
+Set Alias$PiperSay WimpSlot -min 4000K|MRun <PiperSay$Dir>.PiperSay %*0

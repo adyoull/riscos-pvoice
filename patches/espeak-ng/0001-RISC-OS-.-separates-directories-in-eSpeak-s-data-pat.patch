@@ -1,0 +1,31 @@
+From f64c03282625a05c10e9afe80a276d91cb79f850 Mon Sep 17 00:00:00 2001
+From: Andrew Youll <adyoull@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 09:33:43 +0100
+Subject: [PATCH] RISC OS: '.' separates directories in eSpeak's data paths
+
+---
+ src/libespeak-ng/speech.h | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/libespeak-ng/speech.h b/src/libespeak-ng/speech.h
+index 69aacae2..a782e7a5 100644
+--- a/src/libespeak-ng/speech.h
++++ b/src/libespeak-ng/speech.h
+@@ -59,6 +59,14 @@ extern "C"
+ #define N_PATH_HOME_DEF  230
+ #define NO_VARIADIC_MACROS
+ 
++#elif defined(__riscos__) // RISC OS: native file names (UnixLib with __RISCOSIFY_NO_PROCESS)
++
++#define PLATFORM_POSIX 1
++#define PATHSEP  '.'
++#define N_PATH_HOME_DEF  256
++#define USE_NANOSLEEP
++#define __cdecl
++
+ #else
+ 
+ #define PLATFORM_POSIX 1
+-- 
+2.43.0
+
