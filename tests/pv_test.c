@@ -157,6 +157,29 @@ int main(int argc, char **argv)
 		}
 		free(a2);
 	}
+	/* Stopped: gives up, and the voice still works after. */
+	{
+		volatile int stop = 1;
+		int ns3;
+		float *a3;
+		pv_default_options(v, &o);
+		o.stop = &stop;
+		a3 = pv_synthesize(v, ids, n, &o, &ns3, NULL);
+		checks++;
+		if (a3) {
+			fails++;
+			printf("FAIL stop: synthesis went on\n");
+			free(a3);
+		}
+		stop = 0;
+		a3 = pv_synthesize(v, ids, n, &o, &ns3, NULL);
+		checks++;
+		if (!a3 || ns3 < ns / 2) {
+			fails++;
+			printf("FAIL after a stop\n");
+		}
+		free(a3);
+	}
 	free(audio);
 	pv_free(v);
 	printf("%d checks, %d failed\n", checks, fails);

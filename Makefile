@@ -16,7 +16,7 @@
 -include config.mk
 RCD_DIR ?= ../riscos-crossdev
 RISCOS_TOOLCHAIN ?= /opt/riscos-crossdev-toolchain-1.4-x86_64-linux
-VERSION ?= 0.0.1-test2
+VERSION ?= 0.0.1-test3
 # The voice packaged (its dataset is CC BY-SA 4.0), and the one the tests'
 # references were made with (tools/get-voices.sh fetches and converts both).
 VOICE ?= voices/en_GB-southern_english_female-low.voice
@@ -48,7 +48,23 @@ PV_HDR := src/pvoice.h src/pv_math.h
 SAY_SRC := src/pipersay.c src/pv_espeak.c src/pv_play.c
 SAY_HDR := src/pv_espeak.h src/pv_play.h
 
-all: build/host/pv_test build/host/pipersay build/al/pv_test build/al/pipersay build/ro/pipersay.elf
+# For linking into an application (Folio): engine, eSpeak wrapper and eSpeak.
+build/ro/libpvoice.a: $(PV_SRC) $(PV_HDR) src/pv_espeak.c src/pv_espeak.h build/ro/libespeak.a
+	@mkdir -p build/ro/pv
+	$(RO_CC) $(RO_CFLAGS) $(WARN) -Isrc -I$(ES)/src/include -c src/pvoice.c -o build/ro/pv/pvoice.o
+	$(RO_CC) $(RO_CFLAGS) $(WARN) -Isrc -I$(ES)/src/include -c src/pv_math.c -o build/ro/pv/pv_math.o
+	$(RO_CC) $(RO_CFLAGS) $(WARN) -Isrc -I$(ES)/src/include -c src/pv_espeak.c -o build/ro/pv/pv_espeak.o
+	cp build/ro/libespeak.a $@
+	$(RISCOS_TOOLCHAIN)/bin/arm-riscos-gnueabihf-ar rs $@ build/ro/pv/pvoice.o build/ro/pv/pv_math.o build/ro/pv/pv_espeak.o
+build/al/libpvoice.a: $(PV_SRC) $(PV_HDR) src/pv_espeak.c src/pv_espeak.h build/al/libespeak.a
+	@mkdir -p build/al/pv
+	$(AL_CC) $(AL_CFLAGS) $(WARN) -Isrc -I$(ES)/src/include -c src/pvoice.c -o build/al/pv/pvoice.o
+	$(AL_CC) $(AL_CFLAGS) $(WARN) -Isrc -I$(ES)/src/include -c src/pv_math.c -o build/al/pv/pv_math.o
+	$(AL_CC) $(AL_CFLAGS) $(WARN) -Isrc -I$(ES)/src/include -c src/pv_espeak.c -o build/al/pv/pv_espeak.o
+	cp build/al/libespeak.a $@
+	arm-linux-gnueabihf-ar rs $@ build/al/pv/pvoice.o build/al/pv/pv_math.o build/al/pv/pv_espeak.o
+
+all: build/ro/libpvoice.a build/al/libpvoice.a build/host/pv_test build/host/pipersay build/al/pv_test build/al/pipersay build/ro/pipersay.elf
 
 # eSpeak NG as a library, per target.
 define espeak_lib

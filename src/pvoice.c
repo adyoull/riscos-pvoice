@@ -81,6 +81,7 @@ struct pv_voice {
 	float *d_m, *d_logs, *d_logw, *d_z;
 	int d_n, d_frames;
 	int bad;
+	volatile int *stop;        /* from the options of the synthesis under way */
 	char *err;
 	size_t err_size;
 };
@@ -526,6 +527,12 @@ void pv_default_options(const pv_voice *v, pv_options *o)
 	o->noise_w = v->scales[2];
 	o->speaker = 0;
 	o->seed = 0;
+	o->stop = NULL;
+}
+
+static int stopped(const pv_voice *v)
+{
+	return v->stop && *v->stop;
 }
 
 static int id_of(const pv_voice *v, uint32_t cp)
@@ -699,7 +706,7 @@ static int encode(pv_voice *v, const int *ids, int t, float **x_out, float **m, 
 	}
 	for (l = 0; l < v->cfg[C_LAYERS]; l++) {
 		const enc_layer *L = &v->enc[l];
-		float *y = attention(v, L, x, t), *f;
+		float *y = stopped(v) ? NULL : attention(v, L, x, t), *f;
 		size_t n = (size_t)h * t, j;
 		if (!y) {
 			free(x);
@@ -937,7 +944,7 @@ static void flow_reverse(pv_voice *v, float *z, int f, const float *g)
 	float *row = alloc_f(f);
 	if (!row)
 		return;
-	for (j = v->n_flows - 1; j >= 0; j--) {
+	for (j = v->n_flows - 1; j >= 0 && !stopped(v); j--) {
 		const coupling *cp = &v->fl[j];
 		int hid = cp->pre.out;
 		float *h, *out, *gc = NULL, *m;
@@ -1019,7 +1026,7 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 		x = y;
 		t = tt;
 		n = (size_t)up->out * t;
-		for (j = 0; j < nk; j++) {
+		for (j = 0; j < nk && !stopped(v); j++) {
 			const resblock *r = &v->res[i * nk + j];
 			float *a = alloc_f(n);
 			int q;
@@ -1060,8 +1067,10 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 			}
 		}
 		free(x);
-		if (!xs)
+		if (!xs || stopped(v)) {
+			free(xs);
 			return NULL;
+		}
 		for (n = (size_t)up->out * t; n > 0; n--)
 			xs[n - 1] /= nk;
 		x = xs;
@@ -1096,6 +1105,7 @@ float *pv_synthesize(pv_voice *v, const int *ids, int t, const pv_options *opt, 
 	else
 		pv_default_options(v, &o);
 	seed = o.seed ? o.seed : (uint32_t)time(NULL) * 2654435761u + 1;
+	v->stop = o.stop;
 	if (v->emb_g && v->gin <= 1024) {
 		int s = o.speaker >= 0 && o.speaker < v->cfg[C_SPEAKERS] ? o.speaker : 0;
 		memcpy(g, v->emb_g + (size_t)s * v->gin, v->gin * sizeof *g);
@@ -1154,6 +1164,8 @@ float *pv_synthesize(pv_voice *v, const int *ids, int t, const pv_options *opt, 
 		}
 	}
 	flow_reverse(v, z, f, gp);
+	if (stopped(v))
+		goto done;
 	t1 = pv_clock();
 	if (times) times->flow = t1 - t0;
 	t0 = t1;

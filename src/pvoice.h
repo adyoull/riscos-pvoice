@@ -21,6 +21,8 @@ typedef struct {
 	float noise_w;        /* variation in timing (0.8) */
 	int speaker;          /* multi-speaker voices */
 	uint32_t seed;        /* random numbers; 0 picks one */
+	volatile int *stop;   /* if not NULL: synthesis gives up (returns NULL) soon
+	                       * after another thread sets *stop */
 } pv_options;
 
 /* Loads a .voice file. NULL on failure, with a message in err. */
