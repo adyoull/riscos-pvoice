@@ -16,7 +16,7 @@
 -include config.mk
 RCD_DIR ?= ../riscos-crossdev
 RISCOS_TOOLCHAIN ?= /opt/riscos-crossdev-toolchain-1.4-x86_64-linux
-VERSION ?= 0.0.1-test3
+VERSION ?= 0.0.1-test4
 # The voice packaged (its dataset is CC BY-SA 4.0), and the one the tests'
 # references were made with (tools/get-voices.sh fetches and converts both).
 VOICE ?= voices/en_GB-southern_english_female-low.voice
@@ -90,6 +90,13 @@ build/al/pv_test: tests/pv_test.c $(PV_SRC) $(PV_HDR)
 build/al/pipersay: $(SAY_SRC) $(SAY_HDR) $(PV_SRC) $(PV_HDR) build/al/libespeak.a
 	$(AL_CC) $(AL_CFLAGS) $(WARN) -no-pie -Isrc -I$(ES)/src/include $(SAY_SRC) $(PV_SRC) build/al/libespeak.a -lm -o $@
 
+# One synthesis, for counting instructions under qemu or timing on a board.
+build/al/pv_bench: tests/pv_bench.c $(PV_SRC) $(PV_HDR)
+	@mkdir -p $(@D)
+	$(AL_CC) $(AL_CFLAGS) $(WARN) -no-pie -Isrc tests/pv_bench.c $(PV_SRC) -lm -o $@
+bench: build/al/pv_bench
+	time $(QEMU) build/al/pv_bench voices/en_GB-alan-low-f32.voice tests/ref
+
 build/ro/pipersay.elf: $(SAY_SRC) $(SAY_HDR) $(PV_SRC) $(PV_HDR) build/ro/libespeak.a
 	$(RO_CC) $(RO_CFLAGS) $(WARN) -static -Isrc -I$(ES)/src/include $(SAY_SRC) $(PV_SRC) build/ro/libespeak.a -lm -o $@
 
@@ -129,4 +136,4 @@ zip: build/ro/pipersay.elf
 clean:
 	rm -rf build/host build/al build/ro build/app
 
-.PHONY: all test check zip clean
+.PHONY: all test bench check zip clean

@@ -4,7 +4,7 @@
 run by a small engine in plain C, so they work on RISC OS (and anything else
 with a C compiler). Text becomes phonemes through
 [eSpeak NG](https://github.com/espeak-ng/espeak-ng), as in Piper itself.
-Status: **first test** (0.0.1-test1).
+Status: **test** (0.0.1-test4).
 
 ## How it works
 
@@ -21,8 +21,13 @@ directly, as defined in Piper's training code (`piper/train/vits`):
 4. HiFi-GAN decoder to audio.
 
 Almost all the time goes in convolutions, done as cache-tiled matrix
-products with a NEON kernel (`src/pv_math.c`). A "low" voice needs about
-2.1 billion multiply-adds per second of speech.
+products (`src/pv_math.c`). The weights are packed once, at load, into
+panels of four output channels, so the NEON kernel works on a 4x12 tile of
+results held in registers. The decoder's leaky ReLUs are applied as each
+convolution's input is copied in, and the flow's tanh/sigmoid gates and the
+final tanh use a NEON exponential. A "low" voice needs about 2.1 billion
+multiply-adds per second of speech; `make bench` runs one sentence under
+qemu (0.0.1-test4 executes 29% fewer ARM instructions than test3).
 
 `tools/onnx2voice.py` converts a Piper `.onnx` voice (and its `.json`) into
 a `.voice` file: the weights in half precision (31 MB; the difference from

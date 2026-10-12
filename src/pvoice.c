@@ -242,14 +242,16 @@ static int get_conv(pv_voice *v, pv_conv *c, const char *path, int required)
 		if (!c->w)
 			return -1;
 	} else {
-		/* Straight from the file into [k][out][in]. */
-		float *p = track(v, malloc((size_t)c->out * c->in * c->k * sizeof *p));
+		/* Straight from the file into per-tap out x in matrices, packed
+		 * for pv_gemm_packed. */
+		size_t tap = (size_t)c->out * c->in;
+		float *p = track(v, malloc(tap * c->k * sizeof *p));
 		if (!p)
 			return -1;
 		for (o = 0; o < c->out; o++)
 			for (i = 0; i < c->in; i++)
 				for (k = 0; k < c->k; k++)
-					p[((size_t)k * c->out + o) * c->in + i] = value(we, c->transposed
+					p[k * tap + pv_packed_index(c->out, c->in, o, i)] = value(we, c->transposed
 						? ((size_t)i * c->out + o) * c->k + k : ((size_t)o * c->in + i) * c->k + k);
 		c->w = p;
 	}
@@ -613,6 +615,16 @@ static float *conv_new(const pv_conv *c, const float *x, int t, int *tout)
 	return y;
 }
 
+/* y = conv(leaky_relu(x)) into a new buffer. */
+static float *conv_new_act(const pv_conv *c, const float *x, int t, float slope)
+{
+	int to = pv_conv_out_len(c, t);
+	float *y = alloc_f((size_t)c->out * to);
+	if (y)
+		pv_conv_run_act(c, x, t, t, y, to, slope);
+	return y;
+}
+
 /* Adds a [ch] vector (a 1x1 convolution of the speaker embedding) to every
  * time step. */
 static void add_cond(const pv_conv *c, const float *g, float *x, int t)
@@ -972,11 +984,7 @@ static void flow_reverse(pv_voice *v, float *z, int f, const float *g)
 					for (i = 0; i < f; i++)
 						xi[(size_t)c * f + i] += gc[l * 2 * hid + c];
 			/* tanh(first half) * sigmoid(second half) */
-			for (c = 0; c < hid; c++)
-				for (i = 0; i < f; i++) {
-					float a = xi[(size_t)c * f + i], b = xi[(size_t)(hid + c) * f + i];
-					xi[(size_t)c * f + i] = tanhf(a) / (1.0f + expf(-b));
-				}
+			pv_gate(xi, xi + (size_t)hid * f, (size_t)hid * f);
 			rs = conv_new(&cp->rs[l], xi, f, NULL);
 			free(xi);
 			if (!rs)
@@ -1034,20 +1042,13 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 				break;
 			memcpy(a, x, n * sizeof *a);
 			for (q = 0; q < r->n; q++) {
-				float *xt = alloc_f(n), *u;
+				/* leaky ReLU, then the convolution (the ReLU done as it pads) */
+				float *u = conv_new_act(&r->c[0][q], a, t, 0.1f);
 				size_t s;
-				if (!xt)
-					break;
-				memcpy(xt, a, n * sizeof *xt);
-				pv_leaky_relu(xt, n, 0.1f);
-				u = conv_new(&r->c[0][q], xt, t, NULL);
-				free(xt);
 				if (!u)
 					break;
 				if (v->cfg[C_RESBLOCK] == 1) {
-					float *u2;
-					pv_leaky_relu(u, n, 0.1f);
-					u2 = conv_new(&r->c[1][q], u, t, NULL);
+					float *u2 = conv_new_act(&r->c[1][q], u, t, 0.1f);
 					free(u);
 					if (!u2)
 						break;
@@ -1075,13 +1076,12 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 			xs[n - 1] /= nk;
 		x = xs;
 	}
-	pv_leaky_relu(x, (size_t)v->dec_post.in * t, 0.01f);
-	y = conv_new(&v->dec_post, x, t, &tt);
+	y = conv_new_act(&v->dec_post, x, t, 0.01f);
+	tt = pv_conv_out_len(&v->dec_post, t);
 	free(x);
 	if (!y)
 		return NULL;
-	for (i = 0; i < tt; i++)
-		y[i] = tanhf(y[i]);
+	pv_tanh(y, tt);
 	*n_out = tt;
 	return y;
 }

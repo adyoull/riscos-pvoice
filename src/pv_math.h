@@ -16,10 +16,18 @@ void pv_gemm(int m, int n, int k, const float *a, int lda, const float *b, int l
 void pv_gemm_taps(int m, int n, int k, int taps, const float *a, int lda, const float *b, int ldb,
 		int tap_step, float *c, int ldc);
 
+/* Weights packed for pv_gemm_packed: where A[row][col] (an m x k matrix)
+ * goes. */
+size_t pv_packed_index(int m, int k, int row, int col);
+/* C[i][j] += sum_t A_t[i][p] * B[p][j + t * tap_step], A_t packed (each
+ * tap's m x k after the last's). */
+void pv_gemm_packed(int m, int n, int k, int taps, const float *ap, const float *b, int ldb,
+		int tap_step, float *c, int ldc);
+
 typedef struct {
 	int out, in, k;           /* channels and kernel width */
 	int stride, pad_l, pad_r, dil, groups, transposed;
-	float *w;                 /* packed: [k][out][in] (depthwise: [out][k]) */
+	float *w;                 /* per tap, out x in packed (pv_packed_index); depthwise: [out][k] */
 	float *b;                 /* out, or NULL */
 } pv_conv;
 
@@ -32,7 +40,13 @@ void pv_conv_run(const pv_conv *c, const float *x, int t, int xld, float *y, int
 /* LayerNorm over the channels at each time step, in place. */
 void pv_layer_norm(float *x, int ch, int t, int ld, const float *gamma, const float *beta);
 
+/* The same, with a leaky ReLU (slope) applied to x first. */
+void pv_conv_run_act(const pv_conv *c, const float *x, int t, int xld, float *y, int yld, float slope);
+
 void pv_leaky_relu(float *x, size_t n, float slope);
+/* a = tanh(a) * sigmoid(b); and tanh, in place (fast, to about 1e-7). */
+void pv_gate(float *a, const float *b, size_t n);
+void pv_tanh(float *x, size_t n);
 void pv_gelu(float *x, size_t n);
 void pv_relu(float *x, size_t n);
 
