@@ -141,116 +141,245 @@ size_t pv_packed_index(int m, int k, int row, int col)
 	return (size_t)m4 * k + (size_t)(row - m4) * k + col;
 }
 
-/* Rows m4..m: the left-over rows, row-major (k apart) at rest. */
-static void packed_tail_rows(int m, int n0, int n1, int k0, int k1, int k, const float *rest,
-		const float *b, int ldb, float *c, int ldc)
+/* ---- The convolution engine ---------------------------------------------- */
+
+/* Every convolution (and each phase of a transposed one) is one product
+ *
+ *   C[i][j] = init + sum over taps t, inputs p of A_t[i][p] * B_t[p][j],
+ *   B_t[p][j] = act(x[p][j + off0 + t * off_step]), 0 outside 0..t_in-1
+ *
+ * with A_t packed (pv_packed_index) a_tap floats apart, and init either C's
+ * own values (accumulate) or the bias plus a residual signal. B is never
+ * made in full: for each block of NB2 output columns and a slice of the
+ * inputs (kb of them, across every tap) its part is packed into strips 12
+ * columns wide, [strip][tap][p][12], applying the leaky ReLU and the zero
+ * padding as it's copied. One strip (12 KB at most) is used by every
+ * four-row panel of A in turn, so it stays in the L1 cache while A streams
+ * from L2; each 4 x 12 tile of C stays in 12 NEON registers across the
+ * whole slice. Layer by layer that's one pass over the input and one over
+ * the output, where padding, bias, the product and the residual sum were
+ * separate passes over signals of megabytes (the decoder's last stage is
+ * 32 channels x 16000 a second). Tuned with a model of the Cortex-A72's
+ * caches (32 KB 2-way L1, 1 MB L2) under qemu. */
+#define NB2  96         /* output columns per block (8 strips) */
+#define KQ   256        /* taps x inputs per slice */
+
+typedef struct {
+	const float *x;         /* B's source rows, xld apart, t_in long */
+	int xld, t_in, off0, off_step;
+	float slope;            /* leaky ReLU on the way in; 1: none */
+	const float *bias;      /* init (first slice): bias[i] (or 0) + res[i][j] (or 0) */
+	const float *res;
+	int resld;
+	int accumulate;         /* init is C's own values instead */
+} pv_bsrc;
+
+static float *bpack;
+static size_t bpack_cap;
+
+static inline float act(float v, float slope)
 {
-	int i, j, p, m4 = m & ~3;
-	for (i = m4; i < m; i++)
-		for (p = k0; p < k1; p++) {
-			float av = rest[(size_t)(i - m4) * k + p];
-			const float *br = b + p * ldb;
-			float *cr = c + i * ldc;
-			for (j = n0; j < n1; j++)
-				cr[j] += av * br[j];
-		}
+	return v < 0 ? v * slope : v;
 }
 
-/* One block, 4 rows by 12 columns in registers (12 NEON accumulators, 3
- * for B, 1 for A's four weights: all 16), then by 8, then plainly. */
-static void block_packed(int m, int n0, int n1, int k0, int k1, int k, const float *ap,
-		const float *b, int ldb, float *c, int ldc)
+static void pack_b(const pv_bsrc *s, int taps, int k0, int k1, int j0, int j1, float *bp)
 {
-	int i, j, p, m4 = m & ~3;
-	for (i = 0; i < m4; i += 4) {
-		const float *pa = ap + (size_t)(i >> 2) * k * 4;
-		float *c0 = c + i * ldc, *c1 = c0 + ldc, *c2 = c1 + ldc, *c3 = c2 + ldc;
-		j = n0;
+	int j, t, p, q, kb = k1 - k0;
+	for (j = j0; j < j1; j += 12) {
+		int w = j1 - j < 12 ? j1 - j : 12;
+		for (t = 0; t < taps; t++) {
+			int u0 = j + s->off0 + t * s->off_step;    /* x column for this strip's first */
+			for (p = k0; p < k1; p++) {
+				const float *src = s->x + (size_t)p * s->xld;
+				float *d = bp + ((size_t)((j - j0) / 12) * taps * kb + (size_t)t * kb + (p - k0)) * 12;
+				if (u0 >= 0 && u0 + w <= s->t_in && w == 12) {
+					const float *r = src + u0;
+					if (s->slope == 1.0f) {
+						memcpy(d, r, 12 * sizeof *d);
+					} else {
 #ifdef PV_NEON
-		for (; j + 12 <= n1; j += 12) {
-			const float *bp = b + k0 * ldb + j, *pp = pa + k0 * 4;
-			float32x4_t s00 = vld1q_f32(c0 + j), s01 = vld1q_f32(c0 + j + 4), s02 = vld1q_f32(c0 + j + 8);
-			float32x4_t s10 = vld1q_f32(c1 + j), s11 = vld1q_f32(c1 + j + 4), s12 = vld1q_f32(c1 + j + 8);
-			float32x4_t s20 = vld1q_f32(c2 + j), s21 = vld1q_f32(c2 + j + 4), s22 = vld1q_f32(c2 + j + 8);
-			float32x4_t s30 = vld1q_f32(c3 + j), s31 = vld1q_f32(c3 + j + 4), s32 = vld1q_f32(c3 + j + 8);
-			for (p = k0; p < k1; p++, bp += ldb, pp += 4) {
+						/* max(v, 0) + slope * min(v, 0) */
+						float32x4_t k = vdupq_n_f32(s->slope), z = vdupq_n_f32(0);
+						for (q = 0; q < 12; q += 4) {
+							float32x4_t v = vld1q_f32(r + q);
+							vst1q_f32(d + q, vmlaq_f32(vmaxq_f32(v, z), vminq_f32(v, z), k));
+						}
+#else
+						for (q = 0; q < 12; q++)
+							d[q] = act(r[q], s->slope);
+#endif
+					}
+				} else {
+					for (q = 0; q < 12; q++) {
+						int u = u0 + q;
+						d[q] = q < w && u >= 0 && u < s->t_in ? act(src[u], s->slope) : 0.0f;
+					}
+				}
+			}
+		}
+	}
+}
+
+/* Where the first slice starts from: C, or bias + residual (or 0). */
+static void init_row(const pv_bsrc *s, int first, int i, int j, int w, const float *c, float *out)
+{
+	int q;
+	if (!first || s->accumulate) {
+		for (q = 0; q < w; q++)
+			out[q] = c[q];
+	} else {
+		float bv = s->bias ? s->bias[i] : 0.0f;
+		const float *r = s->res ? s->res + (size_t)i * s->resld + j : NULL;
+		for (q = 0; q < w; q++)
+			out[q] = r ? bv + r[q] : bv;
+	}
+	for (q = w; q < 12; q++)
+		out[q] = 0;
+}
+
+/* C rows i..i+3 (ldc apart), columns j..j+w-1 (w <= 12): the tile over taps x
+ * kb. pa: the panel's weights for tap 0 at input k0; tap t's are a_tap
+ * floats further on. */
+static void kernel_4x12(const pv_bsrc *s, int first, int i, int j, const float *pa, size_t a_tap,
+		int taps, int kb, const float *bs, float *c, int ldc, int w)
+{
+	float in[4][12];
+	const float *src[4];
+	float bias[4];
+	int t, p, r, q, from_c = !first || s->accumulate;
+	/* Each row starts from C, or bias + residual. */
+	for (r = 0; r < 4; r++) {
+		src[r] = from_c ? c + (size_t)r * ldc : s->res ? s->res + (size_t)(i + r) * s->resld + j : NULL;
+		bias[r] = !from_c && s->bias ? s->bias[i + r] : 0.0f;
+	}
+	if (w < 12)
+		for (r = 0; r < 4; r++)
+			for (q = 0; q < 12; q++)
+				in[r][q] = (q < w && src[r] ? src[r][q] : 0.0f) + bias[r];
+#ifdef PV_NEON
+	{
+		float32x4_t s00, s01, s02, s10, s11, s12, s20, s21, s22, s30, s31, s32;
+#define ROW(r, a0, a1, a2) do { \
+		float32x4_t bv = vdupq_n_f32(bias[r]); \
+		if (w < 12) { a0 = vld1q_f32(in[r]); a1 = vld1q_f32(in[r] + 4); a2 = vld1q_f32(in[r] + 8); } \
+		else if (src[r]) { a0 = vaddq_f32(vld1q_f32(src[r]), bv); a1 = vaddq_f32(vld1q_f32(src[r] + 4), bv); \
+			a2 = vaddq_f32(vld1q_f32(src[r] + 8), bv); } \
+		else { a0 = a1 = a2 = bv; } } while (0)
+		ROW(0, s00, s01, s02); ROW(1, s10, s11, s12); ROW(2, s20, s21, s22); ROW(3, s30, s31, s32);
+#undef ROW
+		for (t = 0; t < taps; t++) {
+			const float *pp = pa + t * a_tap;
+			for (p = 0; p < kb; p++, pp += 4, bs += 12) {
 				float32x4_t av = vld1q_f32(pp);
 				float32x2_t lo = vget_low_f32(av), hi = vget_high_f32(av);
-				float32x4_t b0 = vld1q_f32(bp), b1 = vld1q_f32(bp + 4), b2 = vld1q_f32(bp + 8);
+				float32x4_t b0 = vld1q_f32(bs), b1 = vld1q_f32(bs + 4), b2 = vld1q_f32(bs + 8);
 				s00 = vmlaq_lane_f32(s00, b0, lo, 0); s01 = vmlaq_lane_f32(s01, b1, lo, 0); s02 = vmlaq_lane_f32(s02, b2, lo, 0);
 				s10 = vmlaq_lane_f32(s10, b0, lo, 1); s11 = vmlaq_lane_f32(s11, b1, lo, 1); s12 = vmlaq_lane_f32(s12, b2, lo, 1);
 				s20 = vmlaq_lane_f32(s20, b0, hi, 0); s21 = vmlaq_lane_f32(s21, b1, hi, 0); s22 = vmlaq_lane_f32(s22, b2, hi, 0);
 				s30 = vmlaq_lane_f32(s30, b0, hi, 1); s31 = vmlaq_lane_f32(s31, b1, hi, 1); s32 = vmlaq_lane_f32(s32, b2, hi, 1);
 			}
-			vst1q_f32(c0 + j, s00); vst1q_f32(c0 + j + 4, s01); vst1q_f32(c0 + j + 8, s02);
-			vst1q_f32(c1 + j, s10); vst1q_f32(c1 + j + 4, s11); vst1q_f32(c1 + j + 8, s12);
-			vst1q_f32(c2 + j, s20); vst1q_f32(c2 + j + 4, s21); vst1q_f32(c2 + j + 8, s22);
-			vst1q_f32(c3 + j, s30); vst1q_f32(c3 + j + 4, s31); vst1q_f32(c3 + j + 8, s32);
 		}
-		for (; j + 8 <= n1; j += 8) {
-			const float *bp = b + k0 * ldb + j, *pp = pa + k0 * 4;
-			float32x4_t s00 = vld1q_f32(c0 + j), s01 = vld1q_f32(c0 + j + 4);
-			float32x4_t s10 = vld1q_f32(c1 + j), s11 = vld1q_f32(c1 + j + 4);
-			float32x4_t s20 = vld1q_f32(c2 + j), s21 = vld1q_f32(c2 + j + 4);
-			float32x4_t s30 = vld1q_f32(c3 + j), s31 = vld1q_f32(c3 + j + 4);
-			for (p = k0; p < k1; p++, bp += ldb, pp += 4) {
-				float32x4_t av = vld1q_f32(pp);
-				float32x2_t lo = vget_low_f32(av), hi = vget_high_f32(av);
-				float32x4_t b0 = vld1q_f32(bp), b1 = vld1q_f32(bp + 4);
-				s00 = vmlaq_lane_f32(s00, b0, lo, 0); s01 = vmlaq_lane_f32(s01, b1, lo, 0);
-				s10 = vmlaq_lane_f32(s10, b0, lo, 1); s11 = vmlaq_lane_f32(s11, b1, lo, 1);
-				s20 = vmlaq_lane_f32(s20, b0, hi, 0); s21 = vmlaq_lane_f32(s21, b1, hi, 0);
-				s30 = vmlaq_lane_f32(s30, b0, hi, 1); s31 = vmlaq_lane_f32(s31, b1, hi, 1);
-			}
-			vst1q_f32(c0 + j, s00); vst1q_f32(c0 + j + 4, s01);
-			vst1q_f32(c1 + j, s10); vst1q_f32(c1 + j + 4, s11);
-			vst1q_f32(c2 + j, s20); vst1q_f32(c2 + j + 4, s21);
-			vst1q_f32(c3 + j, s30); vst1q_f32(c3 + j + 4, s31);
+		if (w == 12) {
+			float *c0 = c, *c1 = c0 + ldc, *c2 = c1 + ldc, *c3 = c2 + ldc;
+			vst1q_f32(c0, s00); vst1q_f32(c0 + 4, s01); vst1q_f32(c0 + 8, s02);
+			vst1q_f32(c1, s10); vst1q_f32(c1 + 4, s11); vst1q_f32(c1 + 8, s12);
+			vst1q_f32(c2, s20); vst1q_f32(c2 + 4, s21); vst1q_f32(c2 + 8, s22);
+			vst1q_f32(c3, s30); vst1q_f32(c3 + 4, s31); vst1q_f32(c3 + 8, s32);
+			return;
 		}
+		vst1q_f32(in[0], s00); vst1q_f32(in[0] + 4, s01); vst1q_f32(in[0] + 8, s02);
+		vst1q_f32(in[1], s10); vst1q_f32(in[1] + 4, s11); vst1q_f32(in[1] + 8, s12);
+		vst1q_f32(in[2], s20); vst1q_f32(in[2] + 4, s21); vst1q_f32(in[2] + 8, s22);
+		vst1q_f32(in[3], s30); vst1q_f32(in[3] + 4, s31); vst1q_f32(in[3] + 8, s32);
+	}
 #else
-		for (; j + 8 <= n1; j += 8) {
-			const float *bp = b + k0 * ldb + j, *pp = pa + k0 * 4;
-			float s0[8], s1[8], s2[8], s3[8];
-			int q;
-			for (q = 0; q < 8; q++) {
-				s0[q] = c0[j + q]; s1[q] = c1[j + q]; s2[q] = c2[j + q]; s3[q] = c3[j + q];
-			}
-			for (p = k0; p < k1; p++, bp += ldb, pp += 4) {
-				float v0 = pp[0], v1 = pp[1], v2 = pp[2], v3 = pp[3];
-				for (q = 0; q < 8; q++) {
-					float bv = bp[q];
-					s0[q] += v0 * bv; s1[q] += v1 * bv; s2[q] += v2 * bv; s3[q] += v3 * bv;
-				}
-			}
-			for (q = 0; q < 8; q++) {
-				c0[j + q] = s0[q]; c1[j + q] = s1[q]; c2[j + q] = s2[q]; c3[j + q] = s3[q];
-			}
-		}
-#endif
-		/* The last few columns, plainly. */
-		for (; j < n1; j++)
-			for (p = k0; p < k1; p++) {
-				const float *pp = pa + p * 4;
-				float bv = b[p * ldb + j];
-				c0[j] += pp[0] * bv; c1[j] += pp[1] * bv; c2[j] += pp[2] * bv; c3[j] += pp[3] * bv;
+	if (w == 12)
+		for (r = 0; r < 4; r++)
+			for (q = 0; q < 12; q++)
+				in[r][q] = (src[r] ? src[r][q] : 0.0f) + bias[r];
+	for (t = 0; t < taps; t++) {
+		const float *pp = pa + t * a_tap;
+		for (p = 0; p < kb; p++, pp += 4, bs += 12)
+			for (q = 0; q < 12; q++) {
+				float bv = bs[q];
+				in[0][q] += pp[0] * bv; in[1][q] += pp[1] * bv; in[2][q] += pp[2] * bv; in[3][q] += pp[3] * bv;
 			}
 	}
-	if (m4 < m)
-		packed_tail_rows(m, n0, n1, k0, k1, k, ap + (size_t)m4 * k, b, ldb, c, ldc);
+#endif
+	for (r = 0; r < 4; r++)
+		for (q = 0; q < w; q++)
+			c[(size_t)r * ldc + q] = in[r][q];
+}
+
+/* One left-over row (i >= m4): row-major weights, k apart, at ar for tap 0. */
+static void kernel_row(const pv_bsrc *s, int first, int i, int j, const float *ar, size_t a_tap,
+		int taps, int kb, const float *bs, float *c, int w)
+{
+	float in[12];
+	int t, p, q;
+	init_row(s, first, i, j, w, c, in);
+	for (t = 0; t < taps; t++) {
+		const float *pr = ar + t * a_tap;
+		for (p = 0; p < kb; p++, bs += 12) {
+			float av = pr[p];
+			for (q = 0; q < 12; q++)
+				in[q] += av * bs[q];
+		}
+	}
+	for (q = 0; q < w; q++)
+		c[q] = in[q];
+}
+
+/* C (m x n, ldc) as described above, for a k-input product. */
+static int gemm_conv(int m, int n, int k, int taps, const float *ap, size_t a_tap, const pv_bsrc *s,
+		float *c, int ldc)
+{
+	int m4 = m & ~3, kb = KQ / taps, j0, k0, i;
+	size_t need;
+	if (kb < 8)
+		kb = 8;
+	if (kb > k)
+		kb = k;
+	need = (size_t)((NB2 + 11) / 12) * taps * kb * 12;
+	if (need > bpack_cap) {
+		float *nbp = realloc(bpack, need * sizeof *nbp);
+		if (!nbp)
+			return -1;
+		bpack = nbp;
+		bpack_cap = need;
+	}
+	for (j0 = 0; j0 < n; j0 += NB2) {
+		int j1 = j0 + NB2 < n ? j0 + NB2 : n;
+		for (k0 = 0; k0 < k; k0 += kb) {
+			int k1 = k0 + kb < k ? k0 + kb : k, kn = k1 - k0, j;
+			pack_b(s, taps, k0, k1, j0, j1, bpack);
+			for (j = j0; j < j1; j += 12) {
+				const float *bs = bpack + (size_t)((j - j0) / 12) * taps * kn * 12;
+				int w = j1 - j < 12 ? j1 - j : 12;
+				for (i = 0; i < m4; i += 4)
+					kernel_4x12(s, k0 == 0, i, j, ap + ((size_t)(i >> 2) * k + k0) * 4, a_tap, taps, kn,
+						bs, c + (size_t)i * ldc + j, ldc, w);
+				for (; i < m; i++)
+					kernel_row(s, k0 == 0, i, j, ap + (size_t)m4 * k + (size_t)(i - m4) * k + k0, a_tap,
+						taps, kn, bs, c + (size_t)i * ldc + j, w);
+			}
+		}
+	}
+	return 0;
 }
 
 void pv_gemm_packed(int m, int n, int k, int taps, const float *ap, const float *b, int ldb,
 		int tap_step, float *c, int ldc)
 {
-	int j0, k0, t;
-	for (j0 = 0; j0 < n; j0 += NB) {
-		int j1 = j0 + NB < n ? j0 + NB : n;
-		for (t = 0; t < taps; t++)
-			for (k0 = 0; k0 < k; k0 += KB) {
-				int k1 = k0 + KB < k ? k0 + KB : k;
-				block_packed(m, j0, j1, k0, k1, k, ap + (size_t)t * m * k, b + t * tap_step, ldb, c, ldc);
-			}
-	}
+	pv_bsrc s;
+	memset(&s, 0, sizeof s);
+	s.x = b;
+	s.xld = ldb;
+	s.t_in = 0x3fffffff;           /* the caller keeps every column in range */
+	s.off_step = tap_step;
+	s.slope = 1.0f;
+	s.accumulate = 1;
+	gemm_conv(m, n, k, taps, ap, (size_t)m * k, &s, c, ldc);
 }
 
 /* ---- Convolutions -------------------------------------------------------- */
@@ -284,78 +413,90 @@ static void copy_act(float *d, const float *s, int n, float slope)
 		d[i] = s[i] < 0 ? s[i] * slope : s[i];
 }
 
-void pv_conv_run_act(const pv_conv *c, const float *x, int t, int xld, float *y, int yld, float slope)
+void pv_conv_run_res(const pv_conv *c, const float *x, int t, int xld, float *y, int yld, float slope,
+		const float *res, int resld)
 {
 	int tout = pv_conv_out_len(c, t), o, i, kk;
+	pv_bsrc s;
+	memset(&s, 0, sizeof s);
+	s.x = x;
+	s.xld = xld;
+	s.t_in = t;
+	s.slope = slope;
+	s.bias = c->b;
+	s.res = res;
+	s.resld = resld;
 	if (c->transposed) {
-		/* y[o][s*t' - pad_l + kk] += sum_i W[kk][o][i] x[i][t'], one tap at a time. */
-		float *tmp = get_scratch((size_t)c->out * t);
-		for (o = 0; o < c->out; o++) {
-			float bv = c->b ? c->b[o] : 0.0f;
-			for (i = 0; i < tout; i++)
-				y[o * yld + i] = bv;
-		}
-		if (!tmp)
-			return;
-		for (kk = 0; kk < c->k; kk++) {
-			int tt, first = -1, last = -1;
-			memset(tmp, 0, (size_t)c->out * t * sizeof *tmp);
-			pv_gemm_packed(c->out, t, c->in, 1, c->w + (size_t)kk * c->out * c->in, x, xld, 0, tmp, t);
-			/* The inputs that land inside the output. */
-			for (tt = 0; tt < t; tt++) {
-				int pos = tt * c->stride - c->pad_l + kk;
-				if (pos >= 0 && pos < tout) {
-					if (first < 0)
-						first = tt;
-					last = tt;
-				}
+		/* Polyphase: output phase r (positions s*u + r) is an ordinary
+		 * convolution of x with the taps kk = r + pad_l (mod s), spaced s
+		 * apart: y[s*u + r] = sum W[kk] x[u + (r + pad_l - kk) / s]. Each
+		 * phase is made into a scratch row block, then spread out. */
+		int st = c->stride, r;
+		for (r = 0; r < st && r < tout; r++) {
+			int kk0 = ((r + c->pad_l) % st + st) % st, taps = 0, nr = (tout - r + st - 1) / st;
+			float *tmp;
+			for (kk = kk0; kk < c->k; kk += st)
+				taps++;
+			tmp = get_scratch((size_t)c->out * nr);
+			if (!tmp)
+				return;
+			s.off0 = (r + c->pad_l - kk0) / st;
+			s.off_step = -1;
+			s.res = NULL;
+			if (taps == 0) {
+				for (o = 0; o < c->out; o++)
+					for (i = 0; i < nr; i++)
+						tmp[(size_t)o * nr + i] = c->b ? c->b[o] : 0.0f;
+			} else if (gemm_conv(c->out, nr, c->in, taps, c->w + (size_t)kk0 * c->out * c->in,
+					(size_t)st * c->out * c->in, &s, tmp, nr)) {
+				return;
 			}
-			if (first < 0)
-				continue;
 			for (o = 0; o < c->out; o++) {
-				float *yr = y + o * yld + first * c->stride - c->pad_l + kk;
-				const float *tr = tmp + o * t;
-				for (tt = first; tt <= last; tt++, yr += c->stride)
-					*yr += tr[tt];
+				const float *tr = tmp + (size_t)o * nr;
+				float *yr = y + (size_t)o * yld + r;
+				const float *rr = res ? res + (size_t)o * resld + r : NULL;
+				for (i = 0; i < nr; i++)
+					yr[(size_t)i * st] = rr ? tr[i] + rr[(size_t)i * st] : tr[i];
 			}
 		}
 		return;
 	}
+	if (c->groups == 1 && c->stride == 1) {
+		s.off0 = -c->pad_l;
+		s.off_step = c->dil;
+		gemm_conv(c->out, tout, c->in, c->k, c->w, (size_t)c->out * c->in, &s, y, yld);
+		return;
+	}
 	{
-		/* Pad the input once (activating it on the way); each tap is then
-		 * a shifted view of it. */
-		int tp = t + c->pad_l + c->pad_r;
-		float *xp = get_scratch((size_t)c->in * tp);
-		if (!xp)
-			return;
-		for (i = 0; i < c->in; i++) {
-			float *r = xp + (size_t)i * tp;
-			memset(r, 0, c->pad_l * sizeof *r);
-			copy_act(r + c->pad_l, x + (size_t)i * xld, t, slope);
-			memset(r + c->pad_l + t, 0, c->pad_r * sizeof *r);
-		}
+		/* Depthwise (groups == channels: w is [out][k]), or strided. */
 		for (o = 0; o < c->out; o++) {
-			float bv = c->b ? c->b[o] : 0.0f;
 			float *yr = y + (size_t)o * yld;
-			for (i = 0; i < tout; i++)
-				yr[i] = bv;
-		}
-		if (c->groups == 1) {
-			pv_gemm_packed(c->out, tout, c->in, c->k, c->w, xp, tp, c->dil, y, yld);
-		} else {
-			/* Depthwise (groups == channels): w is [out][k]. */
-			for (o = 0; o < c->out; o++) {
-				const float *xr = xp + (size_t)o * tp;
-				float *yr = y + (size_t)o * yld;
+			for (i = 0; i < tout; i++) {
+				float acc = c->b ? c->b[o] : 0.0f;
+				int ci;
+				if (res)
+					acc += res[(size_t)o * resld + i];
 				for (kk = 0; kk < c->k; kk++) {
-					float wv = c->w[o * c->k + kk];
-					const float *xs = xr + kk * c->dil;
-					for (i = 0; i < tout; i++)
-						yr[i] += wv * xs[i];
+					int u = i * c->stride - c->pad_l + kk * c->dil;
+					if (u < 0 || u >= t)
+						continue;
+					if (c->groups > 1) {
+						acc += c->w[o * c->k + kk] * act(x[(size_t)o * xld + u], slope);
+					} else {
+						for (ci = 0; ci < c->in; ci++)
+							acc += c->w[(size_t)kk * c->out * c->in + pv_packed_index(c->out, c->in, o, ci)] *
+								act(x[(size_t)ci * xld + u], slope);
+					}
 				}
+				yr[i] = acc;
 			}
 		}
 	}
+}
+
+void pv_conv_run_act(const pv_conv *c, const float *x, int t, int xld, float *y, int yld, float slope)
+{
+	pv_conv_run_res(c, x, t, xld, y, yld, slope, NULL, 0);
 }
 
 void pv_conv_run(const pv_conv *c, const float *x, int t, int xld, float *y, int yld)

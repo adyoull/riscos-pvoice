@@ -414,6 +414,18 @@ static int bind(pv_voice *v)
 		if (!r->n)
 			fail(v, "decoder block missing", "dec.resblocks");
 	}
+	/* Each stage ends with the mean of its resblocks (sum / kernels); the
+	 * next layer is a leaky ReLU and a convolution, both linear in a positive
+	 * scale, so the division is folded into that layer's weights. */
+	if (!v->bad && v->cfg[C_KERNELS] > 1) {
+		float k = 1.0f / v->cfg[C_KERNELS];
+		for (i = 0; i < v->cfg[C_UPS]; i++) {
+			pv_conv *c = i + 1 < v->cfg[C_UPS] ? &v->ups[i + 1] : &v->dec_post;
+			size_t q, nw = (size_t)c->out * c->in * c->k;
+			for (q = 0; q < nw; q++)
+				c->w[q] *= k;
+		}
+	}
 	return v->bad ? -1 : 0;
 }
 
@@ -1026,8 +1038,9 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 		const pv_conv *up = &v->ups[i];
 		float *xs = NULL;
 		size_t n;
-		pv_leaky_relu(x, (size_t)up->in * t, 0.1f);
-		y = conv_new(up, x, t, &tt);
+		/* leaky ReLU, then up-sample (the ReLU done as the input's packed) */
+		tt = pv_conv_out_len(up, t);
+		y = conv_new_act(up, x, t, 0.1f);
 		free(x);
 		if (!y)
 			return NULL;
@@ -1036,35 +1049,45 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 		n = (size_t)up->out * t;
 		for (j = 0; j < nk && !stopped(v); j++) {
 			const resblock *r = &v->res[i * nk + j];
-			float *a = alloc_f(n);
+			const float *cur = x;
+			float *u = NULL;
 			int q;
-			if (!a)
-				break;
-			memcpy(a, x, n * sizeof *a);
 			for (q = 0; q < r->n; q++) {
-				/* leaky ReLU, then the convolution (the ReLU done as it pads) */
-				float *u = conv_new_act(&r->c[0][q], a, t, 0.1f);
-				size_t s;
+				/* cur + conv(leaky(cur)) (ResBlock2), or with two convolutions
+				 * (ResBlock1); the residual added as the output's made. */
+				const float *in = cur;
+				float *u1 = NULL;
+				u = alloc_f(n);
 				if (!u)
 					break;
 				if (v->cfg[C_RESBLOCK] == 1) {
-					float *u2 = conv_new_act(&r->c[1][q], u, t, 0.1f);
-					free(u);
-					if (!u2)
+					u1 = conv_new_act(&r->c[0][q], cur, t, 0.1f);
+					if (!u1) {
+						free(u);
+						u = NULL;
 						break;
-					u = u2;
+					}
+					in = u1;
 				}
-				for (s = 0; s < n; s++)
-					a[s] += u[s];
-				free(u);
+				pv_conv_run_res(v->cfg[C_RESBLOCK] == 1 ? &r->c[1][q] : &r->c[0][q], in, t, t, u, t,
+					0.1f, cur, t);
+				free(u1);
+				if (cur != x)
+					free((float *)cur);
+				cur = u;
+			}
+			if (!u) {
+				if (cur != x)
+					free((float *)cur);
+				break;
 			}
 			if (!xs) {
-				xs = a;
+				xs = u;
 			} else {
 				size_t s;
 				for (s = 0; s < n; s++)
-					xs[s] += a[s];
-				free(a);
+					xs[s] += u[s];
+				free(u);
 			}
 		}
 		free(x);
@@ -1072,8 +1095,7 @@ static float *decode(pv_voice *v, const float *z, int f, const float *g, int *n_
 			free(xs);
 			return NULL;
 		}
-		for (n = (size_t)up->out * t; n > 0; n--)
-			xs[n - 1] /= nk;
+		/* (the mean's division is in the next layer's weights) */
 		x = xs;
 	}
 	y = conv_new_act(&v->dec_post, x, t, 0.01f);

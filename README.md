@@ -4,7 +4,7 @@
 run by a small engine in plain C, so they work on RISC OS (and anything else
 with a C compiler). Text becomes phonemes through
 [eSpeak NG](https://github.com/espeak-ng/espeak-ng), as in Piper itself.
-Status: **test** (0.0.1-test4).
+Status: **test** (0.0.1-test5).
 
 ## How it works
 
@@ -20,14 +20,20 @@ directly, as defined in Piper's training code (`piper/train/vits`):
    backwards;
 4. HiFi-GAN decoder to audio.
 
-Almost all the time goes in convolutions, done as cache-tiled matrix
-products (`src/pv_math.c`). The weights are packed once, at load, into
-panels of four output channels, so the NEON kernel works on a 4x12 tile of
-results held in registers. The decoder's leaky ReLUs are applied as each
-convolution's input is copied in, and the flow's tanh/sigmoid gates and the
-final tanh use a NEON exponential. A "low" voice needs about 2.1 billion
-multiply-adds per second of speech; `make bench` runs one sentence under
-qemu (0.0.1-test4 executes 29% fewer ARM instructions than test3).
+Almost all the time goes in convolutions (`src/pv_math.c`): about 2.1
+billion multiply-adds per second of speech. Each is one matrix product
+over all its taps. The weights are packed at load into panels of four
+output channels; the input is packed as it's used, a block at a time, into
+strips 12 columns wide, with the leaky ReLU and the zero padding applied on
+the way. One strip stays in the L1 cache while the weights stream past it,
+and each 4x12 tile of results stays in NEON registers until it's finished,
+starting from the bias and the residual signal, so a layer is one pass
+over its input and one over its output. Transposed convolutions (the
+decoder's up-sampling) are done by phase. The decoder's resblock means are
+folded into the next layer's weights. `make bench` runs one sentence under
+qemu; measured with a cache model of the Cortex-A72 (32 KB L1, 1 MB L2),
+0.0.1-test5 misses the L1 cache 42% less and the L2 cache 42% less than
+test4.
 
 `tools/onnx2voice.py` converts a Piper `.onnx` voice (and its `.json`) into
 a `.voice` file: the weights in half precision (31 MB; the difference from

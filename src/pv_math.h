@@ -42,6 +42,10 @@ void pv_layer_norm(float *x, int ch, int t, int ld, const float *gamma, const fl
 
 /* The same, with a leaky ReLU (slope) applied to x first. */
 void pv_conv_run_act(const pv_conv *c, const float *x, int t, int xld, float *y, int yld, float slope);
+/* y = conv(leaky(x)) + res: the residual (rows resld apart; NULL for none)
+ * added as each output is made. y mustn't be x or res. */
+void pv_conv_run_res(const pv_conv *c, const float *x, int t, int xld, float *y, int yld, float slope,
+		const float *res, int resld);
 
 void pv_leaky_relu(float *x, size_t n, float slope);
 /* a = tanh(a) * sigmoid(b); and tanh, in place (fast, to about 1e-7). */
