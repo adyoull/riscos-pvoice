@@ -22,6 +22,7 @@
 #include "pvoice.h"
 #include "pv_espeak.h"
 #include "pv_play.h"
+#include "pv_math.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -220,8 +221,31 @@ int main(int argc, char **argv)
 	else if (out)
 		_swix(OS_File, _INR(0, 2), 18, out, 0xfb1);   /* WAVE */
 #endif
-	if (play && total && pv_play(pcm, total, pv_sample_rate(v), err, sizeof err))
-		fprintf(stderr, "pipersay: %s\n", err);
+	if (play && total) {
+		/* Up-sampled for the sound system (pv_upsample: no tinny edge
+		 * from its own rate conversion). */
+		int k = pv_upsample_factor(pv_sample_rate(v)), nu = 0;
+		float *fl = malloc(total * sizeof *fl), *up = NULL;
+		short *pu = NULL;
+		size_t i;
+		if (fl) {
+			for (i = 0; i < total; i++)
+				fl[i] = pcm[i];
+			up = pv_upsample(fl, (int)total, k, &nu);
+			pu = up ? malloc((size_t)nu * sizeof *pu) : NULL;
+		}
+		if (pu) {
+			for (i = 0; i < (size_t)nu; i++)
+				pu[i] = (short)(up[i] > 32767 ? 32767 : up[i] < -32768 ? -32768 : lrintf(up[i]));
+			if (pv_play(pu, (size_t)nu, pv_sample_rate(v) * k, err, sizeof err))
+				fprintf(stderr, "pipersay: %s\n", err);
+		} else if (pv_play(pcm, total, pv_sample_rate(v), err, sizeof err)) {
+			fprintf(stderr, "pipersay: %s\n", err);
+		}
+		free(fl);
+		free(up);
+		free(pu);
+	}
 	pv_sentences_free(sent, nsent);
 	free(pcm);
 	free(text);

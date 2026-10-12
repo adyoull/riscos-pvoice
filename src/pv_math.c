@@ -664,3 +664,74 @@ void pv_gelu(float *x, size_t n)
 	for (i = 0; i < n; i++)
 		x[i] = 0.5f * x[i] * (1.0f + erff(x[i] * 0.70710678f));
 }
+
+/* ---- Up-sampling for playback ------------------------------------------------ */
+
+/* A "low" voice speaks at 16 kHz. The sound system plays it at its own
+ * rate (48 kHz, say) by repeating or straight-line joining samples, which
+ * leaves copies of the voice's spectrum above 8 kHz: a tinny, metallic
+ * edge. Here it's up-sampled by a whole factor with a proper low-pass
+ * filter (a Kaiser-windowed sinc, 48 taps per phase, flat to 0.44 of the
+ * voice's rate, copies down by about 80 dB), so the sound system gets a
+ * clean signal at a rate it plays without converting much. */
+#define UP_TAPS 48
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+int pv_upsample_factor(int rate)
+{
+	return rate <= 16000 ? 3 : rate <= 24000 ? 2 : 1;
+}
+
+static double bessel_i0(double x)
+{
+	double s = 1, t = 1;
+	int k;
+	for (k = 1; k < 40; k++) {
+		t *= (x / (2 * k)) * (x / (2 * k));
+		s += t;
+	}
+	return s;
+}
+
+float *pv_upsample(const float *in, int n, int factor, int *n_out)
+{
+	int len = UP_TAPS * factor, c = (len - 1) / 2, m, j, total;
+	float *h, *out;
+	double beta = 8.0, fc = 0.47 / factor;     /* cutoff, in cycles a sample at the new rate */
+	if (factor <= 1) {
+		out = malloc((n ? n : 1) * sizeof *out);
+		if (out)
+			memcpy(out, in, n * sizeof *out);
+		*n_out = n;
+		return out;
+	}
+	h = malloc(len * sizeof *h);
+	total = n * factor;
+	out = malloc((total ? total : 1) * sizeof *out);
+	if (!h || !out) {
+		free(h);
+		free(out);
+		return NULL;
+	}
+	for (j = 0; j < len; j++) {
+		double x = j - (len - 1) / 2.0, r = 2.0 * x / (len - 1);
+		double sinc = x == 0 ? 2 * fc : sin(2 * M_PI * fc * x) / (M_PI * x);
+		double w = bessel_i0(beta * sqrt(fabs(1 - r * r))) / bessel_i0(beta);
+		h[j] = (float)(sinc * w * factor);     /* x factor: the zeros put in between */
+	}
+	/* out[m] = y[m + c], y[k] = sum_j h[j] u[k - j], u = in with factor - 1
+	 * zeros after each sample: only the taps landing on samples count. */
+	for (m = 0; m < total; m++) {
+		int k = m + c, ph = k % factor, i = k / factor;
+		double acc = 0;
+		for (j = ph; j < len; j += factor, i--)
+			if (i >= 0 && i < n)
+				acc += h[j] * in[i];
+		out[m] = (float)acc;
+	}
+	free(h);
+	*n_out = total;
+	return out;
+}

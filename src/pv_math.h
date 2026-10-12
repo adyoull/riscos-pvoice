@@ -54,4 +54,10 @@ void pv_tanh(float *x, size_t n);
 void pv_gelu(float *x, size_t n);
 void pv_relu(float *x, size_t n);
 
+/* For playback: the whole factor to up-sample a voice's rate by (16 kHz:
+ * 3, to 48 kHz; 22.05 kHz: 2, to 44.1 kHz), and the up-sampling itself
+ * (a new buffer of n x factor samples; NULL if out of memory). */
+int pv_upsample_factor(int rate);
+float *pv_upsample(const float *in, int n, int factor, int *n_out);
+
 #endif

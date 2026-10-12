@@ -4,7 +4,7 @@
 run by a small engine in plain C, so they work on RISC OS (and anything else
 with a C compiler). Text becomes phonemes through
 [eSpeak NG](https://github.com/espeak-ng/espeak-ng), as in Piper itself.
-Status: **test** (0.0.1-test5).
+Status: **test** (0.0.1-test6).
 
 ## How it works
 
