@@ -65,16 +65,34 @@ times it on the machine.
 
 ## Building
 
-Needs the [riscos-crossdev](https://github.com/adyoull/riscos-crossdev) 1.4
-toolchain and a riscos-crossdev checkout (set `RISCOS_TOOLCHAIN` and
-`RCD_DIR` in `config.mk`), `gcc-arm-linux-gnueabihf`, `qemu-user`, `cmake`,
-and python3 with `onnx` and `numpy` (and `onnxruntime` and `piper-tts` to
-remake the test references).
+The simplest way is the [riscos-crossdev](https://github.com/adyoull/riscos-crossdev)
+container image, which has the toolchain and everything else:
+
+    docker run --rm -v "$PWD":/src ghcr.io/adyoull/riscos-crossdev:1.8.1 make ci
+
+`make ci` does all of it from a clean checkout: eSpeak NG at Piper's
+commit, patched, with its English data; the en-GB voice, downloaded,
+converted and checked by sha256; the host and ARM Linux builds and the
+tests; the RISC OS build and riscos-crossdev's checks;
+`build/PiperSay-<version>.zip`; and `build/riscos-pvoice-<version>-devkit.tar.gz`
+(the headers, `libpvoice.a` for RISC OS and ARM Linux, eSpeak's English data,
+the voice and the licences, laid out as this repository, for programs that
+link pvoice). GitHub runs the same (`.github/workflows/riscos-build.yml`);
+`.riscos-deps` names the riscos-crossdev release it's built with, and
+`riscos-deps-update.yml` opens a pull request when there's a newer one.
+
+Without the image: a riscos-crossdev checkout and its toolchain (set
+`RCD_DIR` and `RISCOS_TOOLCHAIN` in `config.mk` or the environment),
+`gcc-arm-linux-gnueabihf`, `cmake`, `git`, `curl` and python3 (the voice
+conversion installs `onnx` 1.18.0 and `numpy` 2.1.3 with pip if they're
+missing; `onnxruntime` and `piper-tts` are needed only to remake the test
+references). Then the steps one at a time:
 
     tools/build-espeak.sh    # eSpeak NG at Piper's commit, patched; English data
-    tools/get-voices.sh      # the en-GB voice, converted
+    tools/get-voices.sh      # the en-GB voice, converted and checked
     make && make test        # host and ARM Linux builds, tests
     make zip                 # build/PiperSay-<version>.zip for RISC OS
+    make dist                # build/riscos-pvoice-<version>-devkit.tar.gz
 
 ## Licences
 

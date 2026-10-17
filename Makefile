@@ -9,14 +9,19 @@
 #                           qemu-arm-aligntrap (RISC OS's alignment rules)
 #   make zip                PiperSay for RISC OS with a voice and eSpeak's
 #                           data: build/PiperSay-$(VERSION).zip
+#   make dist               the library for programs built with it (Folio):
+#                           build/riscos-pvoice-$(VERSION)-devkit.tar.gz
+#   make ci                 all of it from a clean checkout, as GitHub does in
+#                           the riscos-crossdev image (.github/workflows)
 #
-# RCD_DIR is a riscos-crossdev checkout; RISCOS_TOOLCHAIN the riscos-crossdev
-# 1.4 toolchain. Set them in config.mk (not in git) or on the command line.
+# RCD_DIR is a riscos-crossdev checkout; RISCOS_TOOLCHAIN its toolchain (the
+# riscos-crossdev image sets both). Otherwise set them in config.mk (not in
+# git) or on the command line.
 
 -include config.mk
 RCD_DIR ?= ../riscos-crossdev
 RISCOS_TOOLCHAIN ?= /opt/riscos-crossdev-toolchain-1.4-x86_64-linux
-VERSION ?= 0.0.1-test6
+VERSION ?= 0.0.1
 # The voice packaged (its dataset is CC BY-SA 4.0), and the one the tests'
 # references were made with (tools/get-voices.sh fetches and converts both).
 VOICE ?= voices/en_GB-southern_english_female-low.voice
@@ -27,10 +32,12 @@ RO_CC := $(RISCOS_TOOLCHAIN)/bin/arm-riscos-gnueabihf-gcc
 AL_CC := arm-linux-gnueabihf-gcc
 HOST_CC ?= gcc
 # NEON (every ARMv7 machine RISC OS 5 runs on has it); tuned for the Pi 4.
-RO_CFLAGS := -O2 -mcpu=cortex-a8 -mtune=cortex-a72 -mfpu=neon -mfloat-abi=hard -fstack-clash-protection
-AL_CFLAGS := -O2 -g -marm -march=armv7-a -mfpu=neon -mfloat-abi=hard -mtune=cortex-a72 \
+# No build folder in what's built (debug information, __FILE__).
+PREFIX_MAP := -ffile-prefix-map=$(CURDIR)=.
+RO_CFLAGS := $(PREFIX_MAP) -O2 -mcpu=cortex-a8 -mtune=cortex-a72 -mfpu=neon -mfloat-abi=hard -fstack-clash-protection
+AL_CFLAGS := $(PREFIX_MAP) -O2 -g -marm -march=armv7-a -mfpu=neon -mfloat-abi=hard -mtune=cortex-a72 \
 	-mno-unaligned-access -fstack-clash-protection
-HOST_CFLAGS := -O2 -g
+HOST_CFLAGS := $(PREFIX_MAP) -O2 -g
 WARN := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -std=gnu99
 
 ES := third/espeak-ng
@@ -134,7 +141,39 @@ zip: build/ro/pipersay.elf
 	python3 $(RCD_DIR)/package/rozip.py build/PiperSay-$(VERSION).zip -C build/app '!PiperSay'
 	@ls -l build/PiperSay-$(VERSION).zip
 
-clean:
-	rm -rf build/host build/al build/ro build/app
+# The devkit: what a program built with pvoice needs, laid out as this
+# repository is (so its PVOICE_DIR can point at the unpacked folder): the
+# headers in src/, build/ro and build/al/libpvoice.a (engine and eSpeak NG),
+# eSpeak's English data in build/espeak-ng-data, the packaged voice in
+# voices/, and the licences.
+DIST := build/dist/riscos-pvoice-$(VERSION)
+dist: build/ro/libpvoice.a build/al/libpvoice.a
+	rm -rf build/dist && mkdir -p $(DIST)/src $(DIST)/build/ro $(DIST)/build/al $(DIST)/voices \
+		$(DIST)/third/espeak-ng $(DIST)/docs
+	cp src/pvoice.h src/pv_espeak.h src/pv_math.h src/pv_play.h $(DIST)/src/
+	cp build/ro/libpvoice.a $(DIST)/build/ro/
+	cp build/al/libpvoice.a $(DIST)/build/al/
+	cp -r $(ESDATA) $(DIST)/build/espeak-ng-data
+	cp $(VOICE) $(DIST)/voices/
+	cp $(ES)/COPYING $(DIST)/third/espeak-ng/COPYING
+	cp docs/VOICES.txt $(DIST)/docs/
+	cp COPYING LICENSE-MIT README.md $(DIST)/
+	tar -C build/dist -czf build/riscos-pvoice-$(VERSION)-devkit.tar.gz riscos-pvoice-$(VERSION)
+	@ls -l build/riscos-pvoice-$(VERSION)-devkit.tar.gz
 
-.PHONY: all test bench check zip clean
+# Everything, from a clean checkout (GitHub, in the riscos-crossdev image):
+# eSpeak NG and the voice fetched and checked, every build, the tests, the
+# RISC OS checks, !PiperSay and the devkit.
+ci:
+	tools/build-espeak.sh
+	tools/get-voices.sh
+	$(MAKE) all
+	$(MAKE) test
+	$(MAKE) check
+	$(MAKE) zip
+	$(MAKE) dist
+
+clean:
+	rm -rf build/host build/al build/ro build/app build/dist
+
+.PHONY: all test bench check zip dist ci clean
