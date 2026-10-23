@@ -89,7 +89,7 @@ int main(int argc, char **argv)
 	pv_clock = ro_clock;
 	for (i = 1; i < argc && argv[i][0] == '-' && argv[i][1]; i++) {
 		char c = argv[i][1];
-		if (strchr("vdorsf", c) && i + 1 >= argc) {
+		if (strchr("vdorsfP", c) && i + 1 >= argc) {
 			fprintf(stderr, "pipersay: -%c needs a value\n", c);
 			return 2;
 		}
@@ -104,8 +104,9 @@ int main(int argc, char **argv)
 		case 'p': play = 1; break;
 		case 'x': ids_only = show = 1; break;
 		case 'f': file = argv[++i]; break;
+		case 'P': pv_prefetch = atoi(argv[++i]); break;
 		default:
-			fprintf(stderr, "usage: pipersay [-v voice] [-d espeak-data] [-o out.wav] [-r speed] [-s seed] [-n] [-i] [-p] text...\n");
+			fprintf(stderr, "usage: pipersay [-v voice] [-d espeak-data] [-o out.wav] [-r speed] [-s seed] [-n] [-i] [-p] [-P prefetch] text...\n");
 			return 2;
 		}
 	}

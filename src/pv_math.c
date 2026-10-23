@@ -177,6 +177,9 @@ typedef struct {
 static float *bpack;
 static size_t bpack_cap;
 
+/* How far ahead (in floats) the kernel asks for weights; 0: not at all. */
+int pv_prefetch = 32;
+
 static inline float act(float v, float slope)
 {
 	return v < 0 ? v * slope : v;
@@ -267,18 +270,35 @@ static void kernel_4x12(const pv_bsrc *s, int first, int i, int j, const float *
 		else { a0 = a1 = a2 = bv; } } while (0)
 		ROW(0, s00, s01, s02); ROW(1, s10, s11, s12); ROW(2, s20, s21, s22); ROW(3, s30, s31, s32);
 #undef ROW
+		/* The panel's weights for each tap are a run of kb x 16 bytes;
+		 * the taps' runs are a_tap floats apart. Ask for each run's start
+		 * now, and within a run for the line pv_prefetch floats ahead once
+		 * per 64-byte line (four steps), so the weights arrive from L2 (or
+		 * RAM) while the sums go on. pv_prefetch 0: none. */
+		if (pv_prefetch)
+			for (t = 0; t < taps; t++)
+				__builtin_prefetch(pa + t * a_tap);
+#define STEP() do { \
+				float32x4_t av = vld1q_f32(pp); \
+				float32x2_t lo = vget_low_f32(av), hi = vget_high_f32(av); \
+				float32x4_t b0 = vld1q_f32(bs), b1 = vld1q_f32(bs + 4), b2 = vld1q_f32(bs + 8); \
+				s00 = vmlaq_lane_f32(s00, b0, lo, 0); s01 = vmlaq_lane_f32(s01, b1, lo, 0); s02 = vmlaq_lane_f32(s02, b2, lo, 0); \
+				s10 = vmlaq_lane_f32(s10, b0, lo, 1); s11 = vmlaq_lane_f32(s11, b1, lo, 1); s12 = vmlaq_lane_f32(s12, b2, lo, 1); \
+				s20 = vmlaq_lane_f32(s20, b0, hi, 0); s21 = vmlaq_lane_f32(s21, b1, hi, 0); s22 = vmlaq_lane_f32(s22, b2, hi, 0); \
+				s30 = vmlaq_lane_f32(s30, b0, hi, 1); s31 = vmlaq_lane_f32(s31, b1, hi, 1); s32 = vmlaq_lane_f32(s32, b2, hi, 1); \
+				pp += 4; bs += 12; } while (0)
 		for (t = 0; t < taps; t++) {
 			const float *pp = pa + t * a_tap;
-			for (p = 0; p < kb; p++, pp += 4, bs += 12) {
-				float32x4_t av = vld1q_f32(pp);
-				float32x2_t lo = vget_low_f32(av), hi = vget_high_f32(av);
-				float32x4_t b0 = vld1q_f32(bs), b1 = vld1q_f32(bs + 4), b2 = vld1q_f32(bs + 8);
-				s00 = vmlaq_lane_f32(s00, b0, lo, 0); s01 = vmlaq_lane_f32(s01, b1, lo, 0); s02 = vmlaq_lane_f32(s02, b2, lo, 0);
-				s10 = vmlaq_lane_f32(s10, b0, lo, 1); s11 = vmlaq_lane_f32(s11, b1, lo, 1); s12 = vmlaq_lane_f32(s12, b2, lo, 1);
-				s20 = vmlaq_lane_f32(s20, b0, hi, 0); s21 = vmlaq_lane_f32(s21, b1, hi, 0); s22 = vmlaq_lane_f32(s22, b2, hi, 0);
-				s30 = vmlaq_lane_f32(s30, b0, hi, 1); s31 = vmlaq_lane_f32(s31, b1, hi, 1); s32 = vmlaq_lane_f32(s32, b2, hi, 1);
-			}
+			p = 0;
+			if (pv_prefetch)
+				for (; p + 4 <= kb; p += 4) {
+					__builtin_prefetch(pp + pv_prefetch);
+					STEP(); STEP(); STEP(); STEP();
+				}
+			for (; p < kb; p++)
+				STEP();
 		}
+#undef STEP
 		if (w == 12) {
 			float *c0 = c, *c1 = c0 + ldc, *c2 = c1 + ldc, *c3 = c2 + ldc;
 			vst1q_f32(c0, s00); vst1q_f32(c0 + 4, s01); vst1q_f32(c0 + 8, s02);
@@ -330,16 +350,39 @@ static void kernel_row(const pv_bsrc *s, int first, int i, int j, const float *a
 		c[q] = in[q];
 }
 
-/* C (m x n, ldc) as described above, for a k-input product. */
+/* C (m x n, ldc) as described above, for a k-input product.
+ *
+ * Order of work, so the weights (A) come from memory as few times as they
+ * can: the columns are taken in stretches whose part of C fits in the L2
+ * cache (C_BUDGET), and within a stretch each slice of A (at most A_SLICE
+ * bytes: fewer inputs per slice for very wide layers) is used for every
+ * block of NB2 columns before the next slice. So A is read from RAM once
+ * per stretch, not once per 96 columns: for the flow's 384 x 192 x 5
+ * layers (1.4 MB of weights over 265 frames) once instead of three times.
+ * The stretch's C stays in L2 between slices. Sizes from the cache model:
+ * RAM misses per sentence 12.3 M before, 9.5 M with these (256-768 KB
+ * stretches and 128-256 KB slices are all within 5% of each other). */
+#define C_BUDGET (512 << 10)
+#define A_SLICE  (256 << 10)
+
 static int gemm_conv(int m, int n, int k, int taps, const float *ap, size_t a_tap, const pv_bsrc *s,
 		float *c, int ldc)
 {
-	int m4 = m & ~3, kb = KQ / taps, j0, k0, i;
+	int m4 = m & ~3, kq = KQ, kb, j0, k0, i, s0, w0, nst;
 	size_t need;
+	if ((size_t)m * kq * sizeof(float) > A_SLICE)
+		kq = (int)(A_SLICE / (sizeof(float) * (size_t)m));
+	kb = kq / taps;
 	if (kb < 8)
 		kb = 8;
 	if (kb > k)
 		kb = k;
+	/* Stretches of whole strips, as even as they can be. */
+	nst = (int)(((size_t)m * n * sizeof(float) + C_BUDGET - 1) / C_BUDGET);
+	if (nst < 1)
+		nst = 1;
+	w0 = (n + nst - 1) / nst;
+	w0 = (w0 + 11) / 12 * 12;
 	need = (size_t)((NB2 + 11) / 12) * taps * kb * 12;
 	if (need > bpack_cap) {
 		float *nbp = realloc(bpack, need * sizeof *nbp);
@@ -348,20 +391,23 @@ static int gemm_conv(int m, int n, int k, int taps, const float *ap, size_t a_ta
 		bpack = nbp;
 		bpack_cap = need;
 	}
-	for (j0 = 0; j0 < n; j0 += NB2) {
-		int j1 = j0 + NB2 < n ? j0 + NB2 : n;
+	for (s0 = 0; s0 < n; s0 += w0) {
+		int s1 = s0 + w0 < n ? s0 + w0 : n;
 		for (k0 = 0; k0 < k; k0 += kb) {
-			int k1 = k0 + kb < k ? k0 + kb : k, kn = k1 - k0, j;
-			pack_b(s, taps, k0, k1, j0, j1, bpack);
-			for (j = j0; j < j1; j += 12) {
-				const float *bs = bpack + (size_t)((j - j0) / 12) * taps * kn * 12;
-				int w = j1 - j < 12 ? j1 - j : 12;
-				for (i = 0; i < m4; i += 4)
-					kernel_4x12(s, k0 == 0, i, j, ap + ((size_t)(i >> 2) * k + k0) * 4, a_tap, taps, kn,
-						bs, c + (size_t)i * ldc + j, ldc, w);
-				for (; i < m; i++)
-					kernel_row(s, k0 == 0, i, j, ap + (size_t)m4 * k + (size_t)(i - m4) * k + k0, a_tap,
-						taps, kn, bs, c + (size_t)i * ldc + j, w);
+			int k1 = k0 + kb < k ? k0 + kb : k, kn = k1 - k0;
+			for (j0 = s0; j0 < s1; j0 += NB2) {
+				int j1 = j0 + NB2 < s1 ? j0 + NB2 : s1, j;
+				pack_b(s, taps, k0, k1, j0, j1, bpack);
+				for (j = j0; j < j1; j += 12) {
+					const float *bs = bpack + (size_t)((j - j0) / 12) * taps * kn * 12;
+					int w = j1 - j < 12 ? j1 - j : 12;
+					for (i = 0; i < m4; i += 4)
+						kernel_4x12(s, k0 == 0, i, j, ap + ((size_t)(i >> 2) * k + k0) * 4, a_tap, taps, kn,
+							bs, c + (size_t)i * ldc + j, ldc, w);
+					for (; i < m; i++)
+						kernel_row(s, k0 == 0, i, j, ap + (size_t)m4 * k + (size_t)(i - m4) * k + k0, a_tap,
+							taps, kn, bs, c + (size_t)i * ldc + j, w);
+				}
 			}
 		}
 	}

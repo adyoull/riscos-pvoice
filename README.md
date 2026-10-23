@@ -4,7 +4,7 @@
 run by a small engine in plain C, so they work on RISC OS (and anything else
 with a C compiler). Text becomes phonemes through
 [eSpeak NG](https://github.com/espeak-ng/espeak-ng), as in Piper itself.
-Status: **test** (0.0.1-test6).
+Status: **test** (0.0.2-test1).
 
 ## How it works
 
@@ -33,7 +33,12 @@ decoder's up-sampling) are done by phase. The decoder's resblock means are
 folded into the next layer's weights. `make bench` runs one sentence under
 qemu; measured with a cache model of the Cortex-A72 (32 KB L1, 1 MB L2),
 0.0.1-test5 misses the L1 cache 42% less and the L2 cache 42% less than
-test4.
+test4. In 0.0.2-test1 the columns are taken in stretches whose results stay
+in the L2 cache, and each slice of weights is used for the whole stretch,
+so a layer's weights come from RAM once per stretch rather than once per
+96 columns (the flow's 1.4 MB layers: once instead of three times): 23%
+fewer RAM misses per sentence. The kernel also asks for its weights ahead
+of use (`-P` in PiperSay sets how far; 0 turns it off).
 
 `tools/onnx2voice.py` converts a Piper `.onnx` voice (and its `.json`) into
 a `.voice` file: the weights in half precision (31 MB; the difference from

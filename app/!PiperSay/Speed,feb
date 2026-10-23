@@ -1,0 +1,12 @@
+| Times PiperSay three ways, without playing: the weights fetched ahead
+| 0 (not at all), 32 (the default) and 64 floats. Each run ends with a
+| "real-time factor" line: lower is faster, under 1 keeps up.
+| Run it in a TaskWindow (Ctrl-F12): Obey <PiperSay$Dir>.Speed
+Set PiperSay$Dir <Obey$Dir>
+WimpSlot -min 4000K
+Echo Prefetch off (-P 0):
+Run <PiperSay$Dir>.PiperSay -P 0 -f <PiperSay$Dir>.TestText -o <Wimp$ScrapDir>.PiperTest
+Echo Prefetch 32 (the default):
+Run <PiperSay$Dir>.PiperSay -P 32 -f <PiperSay$Dir>.TestText -o <Wimp$ScrapDir>.PiperTest
+Echo Prefetch 64:
+Run <PiperSay$Dir>.PiperSay -P 64 -f <PiperSay$Dir>.TestText -o <Wimp$ScrapDir>.PiperTest

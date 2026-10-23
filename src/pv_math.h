@@ -32,6 +32,9 @@ typedef struct {
 } pv_conv;
 
 /* Output length for an input of t. */
+/* How far ahead (in floats) the convolutions ask the cache for weights
+ * (default 32, two cache lines); 0 turns it off. */
+extern int pv_prefetch;
 int pv_conv_out_len(const pv_conv *c, int t);
 /* y[out][tout] = conv(x[in][t]); x rows xld apart, y rows yld apart (yld >=
  * tout). Uses a scratch buffer of its own. */

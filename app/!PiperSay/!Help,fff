@@ -23,6 +23,14 @@ The test
   computer can speak as fast as it talks. The audio is also written to
   <Wimp$ScrapDir>.PiperTest (a WAV file).
 
+The speed test
+  In a TaskWindow, type
+      Obey <PiperSay$Dir>.Speed
+  It makes the same speech three times without playing it: with the
+  weights fetched ahead of use turned off (-P 0), at the usual distance
+  (-P 32) and further ahead (-P 64). Compare the three "real-time factor"
+  lines at the end of each run: lower is faster.
+
 Saying something
       PiperSay -p Hello from RISC OS.
   Options:
@@ -34,6 +42,7 @@ Saying something
       -s 42       a fixed random seed (the same every time)
       -i          show each sentence's phonemes
       -v voice    another .voice file
+      -P 32       how far ahead to fetch weights (0: don't)
   Command lines are short on RISC OS; put longer text in a file.
 
 Licences
